@@ -144,6 +144,8 @@ def process():
                 write_to_s3(already_crawled)
                 body = new_offers.to_html()
                 send_ses_mail(body, SUCCESS_SUBJECT, [RECIPIENT2, RECIPIENT1])
+            else:
+                logger.info("No new offers found!")
 
 
 class Handler:
