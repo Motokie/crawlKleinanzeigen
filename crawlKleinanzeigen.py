@@ -43,17 +43,6 @@ def main(event, context):
     process()
 
 
-def find_deleted_offers(already_crawled: DataFrame, html_lines):
-    found_titles = [line.text for line in html_lines]
-    deleted_offers = []
-    for unique_offer in already_crawled["title"].unique():
-        title_not_deleted = len(already_crawled[already_crawled["title"] == unique_offer]["status"].unique()) < 2
-        if title_not_deleted and unique_offer not in found_titles:
-            deleted_offers.append(Offer(timestamp, unique_offer, "", "OLD", ""))
-            logger.info(unique_offer + " was not found anymore!")
-    return deleted_offers
-
-
 def find_new_offers(already_crawled: DataFrame, html_lines, html_prices):
     already_seen = {}
     for title in already_crawled["title"]:
@@ -66,7 +55,7 @@ def find_new_offers(already_crawled: DataFrame, html_lines, html_prices):
         price = html_prices[i].text.strip()
         url = "https://www.ebay-kleinanzeigen.de" + html_lines[i]['href']
         if line not in already_seen:
-            offers.append(Offer(timestamp, line, url, "NEW", price))
+            offers.append(Offer(timestamp, line, url, price))
     return offers
 
 
@@ -84,7 +73,7 @@ def crawl_immo_sales(url):
 
 def send_ses_mail(body, subject, recipients):
     try:
-        # Provide the contents of the email.
+        # Provide the content of the email.
         logger.warning("Trying to send email")
         response = sesV2Client.send_email(FromEmailAddress=SENDER,
                                           Destination={
@@ -109,8 +98,7 @@ def send_ses_mail(body, subject, recipients):
     except ClientError as e:
         logger.info(e.response['Error']['Message'])
     else:
-        logger.info("Email sent! Message ID:"),
-        logger.info(response['MessageId'])
+        logger.info("Email sent! Message ID:" + response['MessageId'])
 
 
 def write_to_s3(df: DataFrame):
@@ -123,7 +111,7 @@ def read_s3_immo_file():
     try:
         logger.info("Loading S3 object..")
         s3Object.load()
-        logger.info("Loaded S3 object: " + s3Object.get()['Title'])
+        logger.info("Loaded S3 object: " + str(s3Object.get()))
     except ClientError as e:
         errorCode = e.response['Error']['Code']
         if errorCode == "404" or errorCode == "403":
@@ -148,17 +136,13 @@ def process():
 
         logger.info("Found " + str(len(html_lines)) + " entries")
         if len(html_lines) != 0:
-            deleted_offers = offers_to_df(find_deleted_offers(already_crawled, html_lines))
             new_offers = offers_to_df(find_new_offers(already_crawled, html_lines, html_prices))
 
-            already_crawled = pandas.concat([already_crawled, deleted_offers], ignore_index=True, sort=False)
             already_crawled = pandas.concat([already_crawled, new_offers], ignore_index=True, sort=False)
 
-            if deleted_offers is not None or new_offers is not None:
-                write_to_s3(already_crawled)
-
             if new_offers is not None:
-                body = new_offers.to_html(encoding='utf-8')
+                write_to_s3(already_crawled)
+                body = new_offers.to_html()
                 send_ses_mail(body, SUCCESS_SUBJECT, [RECIPIENT2, RECIPIENT1])
 
 
@@ -168,9 +152,8 @@ class Handler:
 
 
 class Offer:
-    def __init__(self, timestamp, title, url, status, price):
+    def __init__(self, timestamp, title, url, price):
         self.timestamp = timestamp
         self.title = title
         self.url = url
-        self.status = status
         self.price = price
