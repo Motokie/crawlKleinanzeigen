@@ -1,0 +1,59 @@
+Resources:
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: main
+      Runtime: python3.8
+      CodeUri: .
+      MemorySize: 512
+      Environment:
+        Variables:
+          REGIONS: "olsberg,sundern-%28sauerland%29,iserlohn,plettenberg,moehnesee,edertal,solingen"
+          PRICE_MIN: ""
+          PRICE_MAX: ""
+          DISTANCE: "20"
+          GROUND_SIZE_MIN: ""
+          GROUND_SIZE_MAX: ""
+          AWS_REGION: "eu-central-1"
+          SUCCESS_SUBJECT: "Neue Immobilien gefunden"
+          ERROR_SUBJECT: "Fehler beim Laden der Immobilien"
+          NEW_OFFERS_TEXT: "Neue Angebote: \r\n"
+          CHARSET: "UTF-8"
+          SENDER: "daniel-harders@t-online.de"
+          RECIPIENT_1: "daniel-harders@t-online.de"
+          RECIPIENT_2: "daniel-harders@t-online.de"
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(10 minutes)
+  MyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          title: "My Crawl API"
+        paths:
+          /hello:
+            get:
+              responses:
+                '200':
+                  description: "OK"
+                  schema:
+                    type: "string"
+              x-amazon-apigateway-integration:
+                type: "aws_proxy"
+                uri:
+                  Fn::Join:
+                    - ""
+                    - - "arn:aws:apigateway:"
+                      - !Ref "AWS::Region"
+                      - ":lambda:path/2015-03-31/functions/"
+                      - !GetAtt LambdaFunction.Arn
+                      - "/invocations"
+                httpMethod: "POST"
+                responses:
+                  default:
+                    statusCode: "200"

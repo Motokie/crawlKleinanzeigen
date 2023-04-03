@@ -1,5 +1,6 @@
 import datetime
 import logging
+import os
 import time
 from io import StringIO
 
@@ -10,27 +11,22 @@ from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
 from pandas.core.frame import DataFrame
 
-SENDER = "daniel-harders@t-online.de"
-RECIPIENT1 = "daniel-harders@t-online.de"
-RECIPIENT2 = "harders-janssen@t-online.de"
+REGIONS = os.environ.setdefault('REGIONS', 'olsberg,sundern-%28sauerland%29,iserlohn,plettenberg,moehnesee,edertal,solingen').split(",")
+PRICE_MIN = os.environ.setdefault('PRICE_MIN', '')
+PRICE_MAX = os.environ.setdefault('PRICE_MAX', '')
+DISTANCE = os.environ.setdefault('DISTANCE', '20')
+GROUND_SIZE_MIN = os.environ.setdefault('GROUND_SIZE_MIN', '')
+GROUND_SIZE_MAX = os.environ.setdefault('GROUND_SIZE_MAX', '')
+
 AWS_REGION = "eu-central-1"
 SUCCESS_SUBJECT = "Neue Immobilien gefunden"
 ERROR_SUBJECT = "Fehler beim Laden der Immobilien"
 NEW_OFFERS_TEXT = "Neue Angebote: \r\n"
 CHARSET = "UTF-8"
 sesV2Client = boto3.client('sesv2', region_name=AWS_REGION)
+BASIC_URL = "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/PH_REGION/preis:PH_PRICE_MIN:PH_PRICE_MAX/c208l1354rPH_DISTANCE+haus_kaufen.grundstuecksflaeche_d:PH_GROUND_SIZE_MIN%2CPH_GROUND_SIZE_MAX"
 
-CRAWL_URLS = [
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/olsberg/preis::200000/c208l1354r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C",
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/sundern-%28sauerland%29/preis::200000/c208l1412r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C",
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/iserlohn/preis::200000/c208l1735r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C",
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/plettenberg/preis::200000/c208l1415r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C",
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/moehnesee/preis::200000/c208l16255r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C",
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/edertal/preis::200000/c208l10306r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C",
-    "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/solingen/preis::200000/c208l2117r20+haus_kaufen.grundstuecksflaeche_d:800.00%2C"]
-
-timestamp = datetime.datetime.fromtimestamp(
-    time.time()).strftime('%Y-%m-%d %H:%M:%S')
+timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
 s3 = boto3.resource('s3')
 s3Object = s3.Object('hotokie-immo', 'crawld.csv')
 
@@ -43,7 +39,16 @@ def main(event, context):
     process()
 
 
-def find_new_offers(already_crawled: DataFrame, html_lines, html_prices):
+def build_urls():
+    urls = []
+
+    for region in REGIONS:
+        urls.append(
+            BASIC_URL.replace("PH_REGION", region).replace("PH_PRICE_MIN", PRICE_MIN).replace("PH_PRICE_MAX", PRICE_MAX).replace("PH_DISTANCE", DISTANCE).replace("PH_GROUND_SIZE_MIN", GROUND_SIZE_MIN).replace("PH_GROUND_SIZE_MAX", GROUND_SIZE_MAX))
+    return urls
+
+
+def find_new_offers(already_crawled: DataFrame, html_lines, html_prices, html_distances):
     already_seen = {}
     for title in already_crawled["title"]:
         title = title.strip()
@@ -54,7 +59,7 @@ def find_new_offers(already_crawled: DataFrame, html_lines, html_prices):
         line = html_lines[i].text
         price = html_prices[i].text.strip()
         url = "https://www.ebay-kleinanzeigen.de" + html_lines[i]['href']
-        if line not in already_seen:
+        if line not in already_seen and html_distances[i] <= int(DISTANCE):
             offers.append(Offer(timestamp, line, url, price))
     return offers
 
@@ -71,10 +76,14 @@ def crawl_immo_sales(url):
     return html
 
 
-def send_ses_mail(body, subject, recipients):
+def send_ses_mail(body, subject):
+    SENDER = os.environ.setdefault("SENDER", "daniel-harders@t-online.de")
+    RECIPIENT1 = os.environ.setdefault("RECIPIENT_1", "daniel-harders@t-online.de")
+    RECIPIENT2 = os.environ.setdefault("RECIPIENT_2", "harders-janssen@t-online.de")
+    recipients = [RECIPIENT2, RECIPIENT1]
     try:
         # Provide the content of the email.
-        logger.warning("Trying to send email")
+        logger.info("Trying to send email")
         response = sesV2Client.send_email(FromEmailAddress=SENDER,
                                           Destination={
                                               'ToAddresses': recipients
@@ -126,24 +135,36 @@ def read_s3_immo_file():
 
 
 def process():
-    for URL in CRAWL_URLS:
+    CRAWL_URLS = build_urls()
+    for url in CRAWL_URLS:
         already_crawled: DataFrame = read_s3_immo_file()
-        crawled_immo_sales = crawl_immo_sales(URL)
-        logger.info("Crawled: " + URL)
+        crawled_immo_sales = (crawl_immo_sales(url))
+        logger.info("Crawled: " + url)
 
         html_lines = crawled_immo_sales.find_all("a", {"class": "ellipsis"})
         html_prices = crawled_immo_sales.find_all("p", {"class": "aditem-main--middle--price-shipping--price"})
+        html_distances = crawled_immo_sales.find_all("div", {"class": "aditem-main--top--left"})
+
+        distances = []
+        for distance in html_distances:
+            distance = str(distance)
+            start_index = distance.find("(") + 1
+            end_index = distance.find(" km)")
+            number_str = distance[start_index:end_index]
+            distances.append(int(number_str))
 
         logger.info("Found " + str(len(html_lines)) + " entries")
+        for line in html_lines:
+            logger.info(line)
         if len(html_lines) != 0:
-            new_offers = offers_to_df(find_new_offers(already_crawled, html_lines, html_prices))
+            new_offers = offers_to_df(find_new_offers(already_crawled, html_lines, html_prices, distances))
 
             already_crawled = pandas.concat([already_crawled, new_offers], ignore_index=True, sort=False)
 
             if new_offers is not None:
                 write_to_s3(already_crawled)
                 body = new_offers.to_html()
-                send_ses_mail(body, SUCCESS_SUBJECT, [RECIPIENT2, RECIPIENT1])
+                send_ses_mail(body, SUCCESS_SUBJECT)
             else:
                 logger.info("No new offers found!")
 
