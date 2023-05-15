@@ -1,6 +1,6 @@
 import os
 
-from src.CrawlKleinanzeigen import build_urls
+from src.CrawlKleinanzeigen import build_urls, crawl_immo_sales
 from src.CrawlKleinanzeigen import process
 
 
@@ -26,3 +26,15 @@ def test_build_urls():
 
 def test_process():
     process()
+
+
+def test_crawl_immo_sales():
+    urls = build_urls()
+
+    for url in urls:
+        html = crawl_immo_sales(url)
+        # print(f"URL: {url}")
+        # print("HTML Content:")
+        # print(html.prettify())
+        # print("-----------------------------------------")
+        print(url)

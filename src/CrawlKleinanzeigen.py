@@ -2,6 +2,7 @@ import datetime
 import logging
 import os
 import time
+import re
 from io import StringIO
 
 import boto3
@@ -11,10 +12,16 @@ from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
 from pandas.core.frame import DataFrame
 
-REGIONS = os.environ.setdefault('REGIONS', 'olsberg,sundern-%28sauerland%29,iserlohn,plettenberg,moehnesee,edertal,solingen').split(",")
+REGIONS = os.environ.setdefault('REGIONS',
+                                'olsberg,sundern-%28sauerland%29,iserlohn,plettenberg,moehnesee,edertal,solingen') \
+    .split(
+    ",")
+KAT_REGION_CODE = os.environ.setdefault('KAT_REGION_CODES',
+                                        'c208l1354,c208l1412,c208l1735,c208l1415,c208l16255,c208l10306,c208l2117') \
+    .split(",")
 PRICE_MIN = os.environ.setdefault('PRICE_MIN', '')
 PRICE_MAX = os.environ.setdefault('PRICE_MAX', '')
-DISTANCE = os.environ.setdefault('DISTANCE', '20')
+DISTANCE = os.environ.setdefault('DISTANCE', '40')
 GROUND_SIZE_MIN = os.environ.setdefault('GROUND_SIZE_MIN', '')
 GROUND_SIZE_MAX = os.environ.setdefault('GROUND_SIZE_MAX', '')
 
@@ -24,7 +31,7 @@ ERROR_SUBJECT = "Fehler beim Laden der Immobilien"
 NEW_OFFERS_TEXT = "Neue Angebote: \r\n"
 CHARSET = "UTF-8"
 sesV2Client = boto3.client('sesv2', region_name=AWS_REGION)
-BASIC_URL = "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/PH_REGION/preis:PH_PRICE_MIN:PH_PRICE_MAX/c208l1354rPH_DISTANCE+haus_kaufen.grundstuecksflaeche_d:PH_GROUND_SIZE_MIN%2CPH_GROUND_SIZE_MAX"
+BASIC_URL = "https://www.ebay-kleinanzeigen.de/s-haus-kaufen/PH_REGION/preis:PH_PRICE_MIN:PH_PRICE_MAX/PH_KAT_REGIONrPH_DISTANCE+haus_kaufen.grundstuecksflaeche_d:PH_GROUND_SIZE_MIN%2CPH_GROUND_SIZE_MAX"
 
 timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
 s3 = boto3.resource('s3')
@@ -42,9 +49,17 @@ def main(event, context):
 def build_urls():
     urls = []
 
-    for region in REGIONS:
+    for region, kat_region_code in zip(REGIONS, KAT_REGION_CODE):
         urls.append(
-            BASIC_URL.replace("PH_REGION", region).replace("PH_PRICE_MIN", PRICE_MIN).replace("PH_PRICE_MAX", PRICE_MAX).replace("PH_DISTANCE", DISTANCE).replace("PH_GROUND_SIZE_MIN", GROUND_SIZE_MIN).replace("PH_GROUND_SIZE_MAX", GROUND_SIZE_MAX))
+            BASIC_URL
+            .replace("PH_REGION", region)
+            .replace("PH_PRICE_MIN", PRICE_MIN)
+            .replace("PH_PRICE_MAX", PRICE_MAX)
+            .replace("PH_KAT_REGION", kat_region_code)
+            .replace("PH_DISTANCE", DISTANCE)
+            .replace("PH_GROUND_SIZE_MIN", GROUND_SIZE_MIN)
+            .replace("PH_GROUND_SIZE_MAX", GROUND_SIZE_MAX))
+    logger.info(urls)
     return urls
 
 
@@ -52,15 +67,16 @@ def find_new_offers(already_crawled: DataFrame, html_lines, html_prices, html_di
     already_seen = {}
     for title in already_crawled["title"]:
         title = title.strip()
-        already_seen[title] = title
+        already_seen[title.strip()] = True
 
     offers = []
     for i in range(len(html_lines)):
         line = html_lines[i].text
         price = html_prices[i].text.strip()
         url = "https://www.ebay-kleinanzeigen.de" + html_lines[i]['href']
-        if line not in already_seen and html_distances[i] <= int(DISTANCE):
+        if line not in already_seen and int(html_distances[i]) <= int(DISTANCE):
             offers.append(Offer(timestamp, line, url, price))
+            already_seen[line] = True
     return offers
 
 
@@ -135,27 +151,21 @@ def read_s3_immo_file():
 
 
 def process():
-    CRAWL_URLS = build_urls()
-    for url in CRAWL_URLS:
-        already_crawled: DataFrame = read_s3_immo_file()
-        crawled_immo_sales = (crawl_immo_sales(url))
-        logger.info("Crawled: " + url)
+    crawl_urls = build_urls()
+    already_crawled: DataFrame = read_s3_immo_file()
+    for URL in crawl_urls:
+        html = crawl_immo_sales(URL)
+        logger.info("Crawled: " + URL)
 
-        html_lines = crawled_immo_sales.find_all("a", {"class": "ellipsis"})
-        html_prices = crawled_immo_sales.find_all("p", {"class": "aditem-main--middle--price-shipping--price"})
-        html_distances = crawled_immo_sales.find_all("div", {"class": "aditem-main--top--left"})
+        html_lines = html.find_all("a", {"class": "ellipsis"})
+        html_prices = html.find_all("p", {"class": "aditem-main--middle--price-shipping--price"})
+        html_distances = html.find_all("div", {"class": "aditem-main--top--left"})
 
         distances = []
         for distance in html_distances:
-            distance = str(distance)
-            start_index = distance.find("(") + 1
-            end_index = distance.find(" km)")
-            number_str = distance[start_index:end_index]
-            distances.append(int(number_str))
+            distances.append(int(extract_number_from_string(str(distance))))
+        logger.info(distances)
 
-        logger.info("Found " + str(len(html_lines)) + " entries")
-        for line in html_lines:
-            logger.info(line)
         if len(html_lines) != 0:
             new_offers = offers_to_df(find_new_offers(already_crawled, html_lines, html_prices, distances))
 
@@ -165,8 +175,20 @@ def process():
                 write_to_s3(already_crawled)
                 body = new_offers.to_html()
                 send_ses_mail(body, SUCCESS_SUBJECT)
+                for new_offer in new_offers:
+                    logger.info(new_offer)
             else:
                 logger.info("No new offers found!")
+
+
+def extract_number_from_string(string):
+    pattern = r'\d+'  # Regex, to find one or more following numbers
+    matches = re.findall(pattern, string)
+    if matches:
+        number = int(matches[-1])
+        return number
+    else:
+        return None
 
 
 class Handler:
