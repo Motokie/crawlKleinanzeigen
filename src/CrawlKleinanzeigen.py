@@ -152,8 +152,8 @@ def read_s3_immo_file():
 
 def process():
     crawl_urls = build_urls()
-    already_crawled: DataFrame = read_s3_immo_file()
     for URL in crawl_urls:
+        already_crawled: DataFrame = read_s3_immo_file()
         html = crawl_immo_sales(URL)
         logger.info("Crawled: " + URL)
 
